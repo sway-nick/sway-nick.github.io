@@ -3908,6 +3908,181 @@
             }
         );
 
+        /* =======================================
+           CLOUD FIRESTORE VISIT COUNTER & 5-TAP STATS
+        ======================================= */
+        (function () {
+            const PROJECT_ID = "english-breakfast-181ba";
+            const API_KEY = "AIzaSyD_-Zrs0NEhIerHyg3S6jlNsXVt5RevABc";
+            const FS_BASE = "https://firestore.googleapis.com/v1/projects/" + PROJECT_ID + "/databases/(default)/documents";
+            const STATS_DOC = "projects/" + PROJECT_ID + "/databases/(default)/documents/site_stats/global";
+
+            async function recordLandingVisit() {
+                try {
+                    if (typeof sessionStorage !== "undefined" && sessionStorage.getItem("eb_visit_counted_session") === "1") {
+                        return;
+                    }
+                    const uniqueKey = "eb_web_visitor_unique_v1";
+                    let isNewUnique = true;
+                    try {
+                        if (typeof localStorage !== "undefined" && localStorage.getItem(uniqueKey) === "1") {
+                            isNewUnique = false;
+                        }
+                    } catch (_) {}
+
+                    const res = await fetch(FS_BASE + ":commit?key=" + API_KEY, {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            writes: [{
+                                transform: {
+                                    document: STATS_DOC,
+                                    fieldTransforms: [
+                                        { fieldPath: "totalVisits", increment: { integerValue: "1" } },
+                                        { fieldPath: "uniqueVisitors", increment: { integerValue: isNewUnique ? "1" : "0" } },
+                                        { fieldPath: "appVisits", increment: { integerValue: "0" } },
+                                        { fieldPath: "appUniqueVisitors", increment: { integerValue: "0" } },
+                                        { fieldPath: "updatedAt", setToServerValue: "REQUEST_TIME" }
+                                    ]
+                                }
+                            }]
+                        })
+                    });
+                    if (res.ok) {
+                        try {
+                            sessionStorage.setItem("eb_visit_counted_session", "1");
+                            if (isNewUnique) localStorage.setItem(uniqueKey, "1");
+                        } catch (_) {}
+                    }
+                } catch (_) {}
+            }
+
+            async function fetchStatsSummary() {
+                const out = {
+                    webTotalVisits: 0,
+                    webUniqueVisitors: 0,
+                    appTotalVisits: 0,
+                    appUniqueVisitors: 0,
+                    lastVisitIso: null,
+                    totalPlayers: 0,
+                    active24h: 0,
+                    active7d: 0,
+                    active30d: 0
+                };
+                try {
+                    const r = await fetch(FS_BASE + "/site_stats/global?key=" + API_KEY);
+                    if (r.ok) {
+                        const doc = await r.json();
+                        const f = doc.fields || {};
+                        out.webTotalVisits = Number((f.totalVisits && f.totalVisits.integerValue) || 0);
+                        out.webUniqueVisitors = Number((f.uniqueVisitors && f.uniqueVisitors.integerValue) || 0);
+                        out.appTotalVisits = Number((f.appVisits && f.appVisits.integerValue) || 0);
+                        out.appUniqueVisitors = Number((f.appUniqueVisitors && f.appUniqueVisitors.integerValue) || 0);
+                        out.lastVisitIso = (f.updatedAt && f.updatedAt.timestampValue) || doc.updateTime || null;
+                    }
+                } catch (_) {}
+
+                try {
+                    let pageToken = "";
+                    const now = Date.now();
+                    for (let page = 0; page < 15; page++) {
+                        const q = "?pageSize=120" + (pageToken ? "&pageToken=" + encodeURIComponent(pageToken) : "") + "&key=" + API_KEY;
+                        const r = await fetch(FS_BASE + "/leaderboard_alltime" + q);
+                        if (!r.ok) break;
+                        const data = await r.json();
+                        const docs = data.documents || [];
+                        out.totalPlayers += docs.length;
+                        for (const d of docs) {
+                            const tsStr = (d.fields && d.fields.updatedAt && d.fields.updatedAt.timestampValue) || d.updateTime;
+                            const ts = tsStr ? Date.parse(tsStr) : 0;
+                            if (ts > 0) {
+                                const age = now - ts;
+                                if (age <= 86400000) out.active24h++;
+                                if (age <= 7 * 86400000) out.active7d++;
+                                if (age <= 30 * 86400000) out.active30d++;
+                            }
+                        }
+                        if (!data.nextPageToken) break;
+                        pageToken = data.nextPageToken;
+                    }
+                } catch (_) {}
+                return out;
+            }
+
+            function openStatsPopup() {
+                const old = document.getElementById("sway-secret-stats-modal");
+                if (old) old.remove();
+
+                const overlay = document.createElement("div");
+                overlay.id = "sway-secret-stats-modal";
+                overlay.style.cssText = "position:fixed;inset:0;z-index:999999;background:rgba(0,0,0,0.72);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:16px;";
+                overlay.innerHTML = `
+                    <div style="background:#081e17;border:1px solid rgba(183,245,45,0.28);border-radius:20px;max-width:370px;width:100%;padding:22px 20px;color:#f6f8f5;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 24px 60px rgba(0,0,0,0.6);">
+                        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+                            <strong style="font-size:17px;">📊 Статистика посещений</strong>
+                            <button type="button" id="sway-stats-close-x" style="background:none;border:none;color:#b8c8c0;font-size:20px;cursor:pointer;line-height:1;">✕</button>
+                        </div>
+                        <div id="sway-stats-content" style="font-size:13.5px;display:flex;flex-direction:column;gap:10px;">
+                            <div style="text-align:center;padding:18px 0;color:#b8c8c0;">Загрузка данных из Firestore...</div>
+                        </div>
+                        <button type="button" id="sway-stats-close-btn" style="margin-top:16px;width:100%;height:42px;border-radius:12px;border:none;background:#b7f52d;color:#05130f;font-weight:700;font-size:14px;cursor:pointer;">Закрыть</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+                const close = () => overlay.remove();
+                overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+                overlay.querySelector("#sway-stats-close-x").addEventListener("click", close);
+                overlay.querySelector("#sway-stats-close-btn").addEventListener("click", close);
+
+                fetchStatsSummary().then((s) => {
+                    const box = overlay.querySelector("#sway-stats-content");
+                    if (!box) return;
+                    const lastStr = s.lastVisitIso
+                        ? new Date(s.lastVisitIso).toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })
+                        : "—";
+                    box.innerHTML = `
+                        <div style="padding:11px 13px;border-radius:12px;background:rgba(255,255,255,0.045);border:1px solid rgba(255,255,255,0.1);">
+                            <div style="font-weight:700;font-size:12px;color:#b7f52d;margin-bottom:6px;text-transform:uppercase;">🌐 Сайт (sway-nick.github.io)</div>
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Уникальных гостей:</span><strong>${s.webUniqueVisitors}</strong></div>
+                            <div style="display:flex;justify-content:space-between;"><span>Всего визитов (сессий):</span><strong>${s.webTotalVisits}</strong></div>
+                        </div>
+                        <div style="padding:11px 13px;border-radius:12px;background:rgba(255,255,255,0.045);border:1px solid rgba(255,255,255,0.1);">
+                            <div style="font-weight:700;font-size:12px;color:#b7f52d;margin-bottom:6px;text-transform:uppercase;">📱 Android-приложение</div>
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Уникальных устройств:</span><strong>${s.appUniqueVisitors}</strong></div>
+                            <div style="display:flex;justify-content:space-between;"><span>Всего сессий:</span><strong>${s.appTotalVisits}</strong></div>
+                        </div>
+                        <div style="padding:11px 13px;border-radius:12px;background:rgba(255,255,255,0.045);border:1px solid rgba(255,255,255,0.1);">
+                            <div style="font-weight:700;font-size:12px;color:#b7f52d;margin-bottom:6px;text-transform:uppercase;">🏆 Игроки в базе (Таблица лидеров)</div>
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Всего зарегистрировано:</span><strong>${s.totalPlayers}</strong></div>
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Активных за 24 часа:</span><strong style="color:#b7f52d;">${s.active24h}</strong></div>
+                            <div style="display:flex;justify-content:space-between;margin-bottom:4px;"><span>Активных за 7 дней:</span><strong>${s.active7d}</strong></div>
+                            <div style="display:flex;justify-content:space-between;"><span>Активных за 30 дней:</span><strong>${s.active30d}</strong></div>
+                        </div>
+                        <div style="font-size:11.5px;color:#b8c8c0;text-align:center;margin-top:2px;">Последний визит: ${lastStr}</div>
+                    `;
+                });
+            }
+
+            recordLandingVisit();
+
+            const footerEl = document.querySelector("footer");
+            if (footerEl) {
+                let taps = 0;
+                let timer = null;
+                footerEl.addEventListener("click", (e) => {
+                    if (e.target && e.target.closest && e.target.closest("a")) return;
+                    taps++;
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(() => { taps = 0; }, 2500);
+                    if (taps >= 5) {
+                        taps = 0;
+                        clearTimeout(timer);
+                        openStatsPopup();
+                    }
+                });
+            }
+        })();
+
     </script>
 
 
